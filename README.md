@@ -40,8 +40,8 @@ input_seismic_data/
 - Обучающие патчи, маски и аугментации генерируются заново при каждом обращении к примеру. Validation и test остаются фиксированными.
 - Inpainting: `BATCH_SIZE = 32`; outpainting: `BATCH_SIZE = 16`. В bottleneck добавлены свёртки с dilation 2 и 4.
 - Inpainting обучается `EPOCHS = 120` (ранняя остановка patience 24) по LR-графику: 3 эпохи линейного warmup до `BASE_LR = 1e-3` + cosine-затухание до `MIN_LR = 1e-5`. Outpainting обучается 75 эпох (patience 12) с `ReduceLROnPlateau(patience=4, factor=0.5)`.
-- Потеря включает L1, MSE, исправленный gradient L1, Sobel/Laplacian L1 на масштабах 1, 1/2 и 1/4, Fourier-L1 по спектру (`rfft2`, ортонормированный) и `0.5 · (1 − R)`.
-- Основной запуск inpainting: `L1_WEIGHT = 0.85`, `GRAD_LOSS_WEIGHT = 1.0`, `HIGH_FREQ_LOSS_WEIGHT = 0.5`, `FOURIER_LOSS_WEIGHT = 0.25`, `RUN_NAME = "fourier-cosine"`; outpainting: `L1_WEIGHT = 1.0`, `GRAD_LOSS_WEIGHT = 0.3`, `HIGH_FREQ_LOSS_WEIGHT = 0.1`, `FOURIER_LOSS_WEIGHT = 0.1`, `RUN_NAME = "fourier"`.
+- Потеря включает L1, MSE, исправленный gradient L1, Sobel/Laplacian L1 на масштабах 1, 1/2 и 1/4, focal frequency loss (FFL) по спектру (`rfft2`, ортонормированный) и `0.5 · (1 − R)`. Вес FFL равен `0.05` и линейно увеличивается в течение первых 5 эпох; на test используется полный вес.
+- Основной запуск inpainting: `L1_WEIGHT = 0.85`, `GRAD_LOSS_WEIGHT = 1.0`, `HIGH_FREQ_LOSS_WEIGHT = 0.5`, `FFL_WEIGHT = 0.05`, `RUN_NAME = "ffl-cosine"`; outpainting: `L1_WEIGHT = 1.0`, `GRAD_LOSS_WEIGHT = 0.3`, `HIGH_FREQ_LOSS_WEIGHT = 0.1`, `FFL_WEIGHT = 0.05`, `RUN_NAME = "ffl"`.
 - Для ablation без перворазностного gradient loss установите `GRAD_LOSS_WEIGHT = 0.0` и `RUN_NAME = "no-grad-l1"`, сохранив остальные параметры, и заново выполните все ячейки. Запуски сравниваются по лучшему validation R.
 
 Старые выходы ячеек очищены, поскольку они относились к прежней конфигурации.
