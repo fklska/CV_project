@@ -1,7 +1,6 @@
 torch
 numpy
 matplotlib
-ipywidgets
 tensorboard
 jupyter
 tqdm
