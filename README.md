@@ -36,8 +36,10 @@ input_seismic_data/
 
 ## Текущая конфигурация
 
-- Inpainting использует патчи 368×176, outpainting — 368×256. В обоих ноутбуках `base_channels = 24`, в bottleneck добавлены свёртки с dilation 2 и 4.
+- Inpainting использует патчи 304×144 с дырой 213×103: 21 837 известных и 21 939 восстанавливаемых пикселей. На инференсе модель получает центрированный crop `y=323:627`, `z=159:303`, а результат записывается только в реальную дыру. Outpainting использует патчи 368×256.
+- В обоих ноутбуках `base_channels = 24`, в bottleneck добавлены свёртки с dilation 2 и 4.
 - Inpainting: `BATCH_SIZE = 24`, `EPOCHS = 100`, `BASE_LR = 2e-3`, `GRAD_LOSS_WEIGHT = 0.75`, `RUN_NAME = "radial-attn"`; LR имеет 3 эпохи warmup и cosine-затухание до `1e-5`.
+- Размеры датасета inpainting: train — 3000 примеров (500 центров × 6), validation — 360 (45 × 8), test — 92 (23 × 4). `TRAIN_SAMPLES_PER_CENTER` задаёт число случайных пространственных примеров на центральный срез за эпоху.
 - Outpainting: `BATCH_SIZE = 16`, `EPOCHS = 75`, LR `2e-3`, `GRAD_LOSS_WEIGHT = 0.3`, `RUN_NAME = "gradient-l1"`; используется `ReduceLROnPlateau(patience=4, factor=0.5)`.
 - Потеря включает L1, MSE, gradient L1 и `0.5 · (1 − R)`. High-frequency и Fourier/FFL-слагаемые удалены. Норма градиентов не вычисляется.
 - Положение патчей, отражения и масштаб амплитуд остаются динамическими. Gaussian noise предрассчитывается перед обучением в банк из 64 вариантов. Нормализация использует только train-срезы.

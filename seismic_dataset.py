@@ -9,8 +9,8 @@ REGIONS = (
     (0, 951, 282, 462),
 )
 
-PATCH_H = 368
-PATCH_W = 176
+PATCH_H = 304
+PATCH_W = 144
 MASK_H = 213
 MASK_W = 103
 
