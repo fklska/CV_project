@@ -74,8 +74,7 @@ async function init() {
 }
 
 function cube() {
-  const [sub, task] = els.cube.value.split(" ");
-  return cubes.find(c => c.sub === sub && c.task === task) || cubes[cubeIdx];
+  return cubes[cubeIdx];
 }
 
 function defaultPos(c, a) {
@@ -90,7 +89,7 @@ function defaultPos(c, a) {
 }
 
 function onCube() {
-  cubeIdx = +els.cube.value;
+  cubeIdx = cubes.findIndex(c => c.sub + " " + c.task === els.cube.value);
   axis = cube().missed_axis;
   const shape = cube().shape;
   els.axis.length = 0;
