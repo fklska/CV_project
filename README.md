@@ -36,15 +36,15 @@ input_seismic_data/
 
 ## Текущая конфигурация
 
-- Inpainting использует патчи 368×176: этот размер помещается во все четыре известные области. Для верхней области вертикальная позиция фиксирована, для нижней доступны три позиции. Outpainting использует патчи 368×256.
-- Обучающие патчи, маски и аугментации генерируются заново при каждом обращении к примеру. Validation и test остаются фиксированными.
-- Inpainting: `BATCH_SIZE = 32`; outpainting: `BATCH_SIZE = 16`. В bottleneck добавлены свёртки с dilation 2 и 4.
-- Inpainting обучается `EPOCHS = 120` (ранняя остановка patience 24) по LR-графику: 3 эпохи линейного warmup до `BASE_LR = 1e-3` + cosine-затухание до `MIN_LR = 1e-5`. Outpainting обучается 75 эпох (patience 12) с `ReduceLROnPlateau(patience=4, factor=0.5)`.
-- Потеря включает L1, MSE, исправленный gradient L1, Sobel/Laplacian L1 на масштабах 1, 1/2 и 1/4, focal frequency loss (FFL) по спектру (`rfft2`, ортонормированный) и `0.5 · (1 − R)`. Вес FFL равен `0.05` и линейно увеличивается в течение первых 5 эпох; на test используется полный вес.
-- Основной запуск inpainting: `L1_WEIGHT = 0.85`, `GRAD_LOSS_WEIGHT = 1.0`, `HIGH_FREQ_LOSS_WEIGHT = 0.5`, `FFL_WEIGHT = 0.05`, `RUN_NAME = "ffl-cosine"`; outpainting: `L1_WEIGHT = 1.0`, `GRAD_LOSS_WEIGHT = 0.3`, `HIGH_FREQ_LOSS_WEIGHT = 0.1`, `FFL_WEIGHT = 0.05`, `RUN_NAME = "ffl"`.
-- Для ablation без перворазностного gradient loss установите `GRAD_LOSS_WEIGHT = 0.0` и `RUN_NAME = "no-grad-l1"`, сохранив остальные параметры, и заново выполните все ячейки. Запуски сравниваются по лучшему validation R.
+- Inpainting использует патчи 368×176, outpainting — 368×256. В обоих ноутбуках `base_channels = 24`, в bottleneck добавлены свёртки с dilation 2 и 4.
+- Inpainting: `BATCH_SIZE = 24`, `EPOCHS = 100`, `BASE_LR = 2e-3`, `GRAD_LOSS_WEIGHT = 0.75`, `RUN_NAME = "radial-attn"`; LR имеет 3 эпохи warmup и cosine-затухание до `1e-5`.
+- Outpainting: `BATCH_SIZE = 16`, `EPOCHS = 75`, LR `2e-3`, `GRAD_LOSS_WEIGHT = 0.3`, `RUN_NAME = "gradient-l1"`; используется `ReduceLROnPlateau(patience=4, factor=0.5)`.
+- Потеря включает L1, MSE, gradient L1 и `0.5 · (1 − R)`. High-frequency и Fourier/FFL-слагаемые удалены. Норма градиентов не вычисляется.
+- Положение патчей, отражения и масштаб амплитуд остаются динамическими. Gaussian noise предрассчитывается перед обучением в банк из 64 вариантов. Нормализация использует только train-срезы.
+- RingAttention обрабатывает весь батч одновременно. Постоянная радиальная маска исключает 35 внешних пикселей дыры, увеличивает вес к центральным 10% и направляет query из внутренних пикселей к внешнему кольцу.
+- Для ablation без gradient loss установите `GRAD_LOSS_WEIGHT = 0.0` и `RUN_NAME = "no-grad-l1"`, сохранив остальные параметры.
 
-Старые выходы ячеек очищены, поскольку они относились к прежней конфигурации.
+Выходы ячеек очищены, поскольку прежние результаты относились к другим конфигурациям.
 
 ## Структура проекта
 
@@ -52,6 +52,8 @@ input_seismic_data/
 ├── 0_seismic.ipynb
 ├── inpainting.ipynb
 ├── outpainting.ipynb
+├── seismic_dataset.py
+├── inference/
 ├── SeismicUtils.py
 ├── TEMPLATE_independent_work_result.ipynb
 ├── requirements.txt

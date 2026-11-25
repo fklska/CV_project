@@ -20,6 +20,7 @@ OUT_PAINT_MASK_BAND = 24
 
 AMP_SCALE_RANGE = (0.9, 1.1)
 NOISE_SIGMA = 0.05
+NOISE_BANK_SIZE = 64
 
 
 def make_inpainting_sample(rng, center, augment):
@@ -31,8 +32,7 @@ def make_inpainting_sample(rng, center, augment):
     flip_h = augment and bool(rng.integers(2))
     flip_v = augment and bool(rng.integers(2))
     amp_scale = float(rng.uniform(*AMP_SCALE_RANGE)) if augment else 1.0
-    noise_sigma = float(rng.uniform(0.0, NOISE_SIGMA)) if augment else 0.0
-    return center, y, z, mask_y, mask_z, flip_h, flip_v, amp_scale, noise_sigma
+    return center, y, z, mask_y, mask_z, flip_h, flip_v, amp_scale
 
 
 def make_outpainting_sample(rng, center, augment):
@@ -41,8 +41,7 @@ def make_outpainting_sample(rng, center, augment):
     flip_h = augment and bool(rng.integers(2))
     flip_v = augment and bool(rng.integers(2))
     amp_scale = float(rng.uniform(*AMP_SCALE_RANGE)) if augment else 1.0
-    noise_sigma = float(rng.uniform(0.0, NOISE_SIGMA)) if augment else 0.0
-    return center, y, z, flip_h, flip_v, amp_scale, noise_sigma
+    return center, y, z, flip_h, flip_v, amp_scale
 
 
 def _make_samples(make_sample, centers, samples_per_center, augment, seed):
@@ -54,9 +53,17 @@ def _make_samples(make_sample, centers, samples_per_center, augment, seed):
     ]
 
 
+def _make_noise_bank(rng, patch_h, patch_w):
+    bank = []
+    for _ in range(NOISE_BANK_SIZE):
+        sigma = float(rng.uniform(0.0, NOISE_SIGMA))
+        noise = rng.standard_normal((5, patch_h, patch_w)).astype(np.float32)
+        bank.append(noise * sigma)
+    return np.stack(bank)
+
+
 def _prepare(
     cube,
-    rng,
     mean,
     std,
     patch_h,
@@ -68,7 +75,7 @@ def _prepare(
     flip_h,
     flip_v,
     amp_scale,
-    noise_sigma
+    noise
 ):
     patch = cube[
         center - 2: center + 3,
@@ -81,9 +88,8 @@ def _prepare(
     target = (target - mean) / std
     patch *= amp_scale
     target *= amp_scale
-    if noise_sigma:
-        noise = rng.standard_normal(patch.shape)
-        patch += noise.astype(np.float32) * noise_sigma
+    if noise is not None:
+        patch += noise
 
     patch *= (1 - mask)[None]
 
@@ -100,7 +106,7 @@ def _prepare(
     inputs = np.concatenate((patch, mask[None]), axis=0)
 
     return (
-        torch.from_numpy(inputs.copy()).float(),
+        torch.from_numpy(inputs).float(),
         torch.from_numpy(target[None].copy()).float(),
         torch.from_numpy(mask[None].copy()).float()
     )
@@ -126,6 +132,10 @@ class InpaintingDataset(Dataset):
         self.augment = augment
         self.dynamic = dynamic
         self.rng = np.random.default_rng(seed)
+        self.noise_bank = (
+            _make_noise_bank(self.rng, PATCH_H, PATCH_W)
+            if augment and NOISE_SIGMA > 0 else None
+        )
         self.samples = None if dynamic else _make_samples(
             make_inpainting_sample,
             centers,
@@ -144,12 +154,15 @@ class InpaintingDataset(Dataset):
         return make_inpainting_sample(self.rng, center, self.augment)
 
     def __getitem__(self, index):
-        center, y, z, mask_y, mask_z, flip_h, flip_v, amp_scale, noise_sigma = self.get_sample(index)
+        center, y, z, mask_y, mask_z, flip_h, flip_v, amp_scale = self.get_sample(index)
         mask = np.zeros((PATCH_H, PATCH_W), dtype=np.float32)
         mask[mask_y: mask_y + MASK_H, mask_z: mask_z + MASK_W] = 1
+        noise = (
+            self.noise_bank[index % len(self.noise_bank)]
+            if self.noise_bank is not None else None
+        )
         return _prepare(
             self.cube,
-            self.rng,
             self.mean,
             self.std,
             PATCH_H,
@@ -161,7 +174,7 @@ class InpaintingDataset(Dataset):
             flip_h,
             flip_v,
             amp_scale,
-            noise_sigma
+            noise
         )
 
 
@@ -185,6 +198,10 @@ class OutpaintingDataset(Dataset):
         self.augment = augment
         self.dynamic = dynamic
         self.rng = np.random.default_rng(seed)
+        self.noise_bank = (
+            _make_noise_bank(self.rng, OUT_PAINT_PATCH_H, OUT_PAINT_PATCH_W)
+            if augment and NOISE_SIGMA > 0 else None
+        )
         self.samples = None if dynamic else _make_samples(
             make_outpainting_sample,
             centers,
@@ -203,13 +220,16 @@ class OutpaintingDataset(Dataset):
         return make_outpainting_sample(self.rng, center, self.augment)
 
     def __getitem__(self, index):
-        center, y, z, flip_h, flip_v, amp_scale, noise_sigma = self.get_sample(index)
+        center, y, z, flip_h, flip_v, amp_scale = self.get_sample(index)
         mask = np.zeros((OUT_PAINT_PATCH_H, OUT_PAINT_PATCH_W), dtype=np.float32)
         mask[:OUT_PAINT_MASK_BAND, :] = 1
         mask[-OUT_PAINT_MASK_BAND:, :] = 1
+        noise = (
+            self.noise_bank[index % len(self.noise_bank)]
+            if self.noise_bank is not None else None
+        )
         return _prepare(
             self.cube,
-            self.rng,
             self.mean,
             self.std,
             OUT_PAINT_PATCH_H,
@@ -221,5 +241,5 @@ class OutpaintingDataset(Dataset):
             flip_h,
             flip_v,
             amp_scale,
-            noise_sigma
+            noise
         )
