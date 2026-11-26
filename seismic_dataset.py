@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, get_worker_info
 
 REGIONS = (
     (0, 368, 0, 462),
@@ -13,6 +13,9 @@ PATCH_H = 304
 PATCH_W = 144
 MASK_H = 213
 MASK_W = 103
+MASK_MARGIN = 16
+
+HELD_OUT_BOX = (77, 290, 179, 282)
 
 OUT_PAINT_PATCH_H = 368
 OUT_PAINT_PATCH_W = 256
@@ -23,16 +26,77 @@ NOISE_SIGMA = 0.05
 NOISE_BANK_SIZE = 64
 
 
+def overlaps_held_out(y, z):
+    hy0, hy1, hz0, hz1 = HELD_OUT_BOX
+    return y < hy1 and y + PATCH_H > hy0 and z < hz1 and z + PATCH_W > hz0
+
+
+def _region_has_free_origin(region):
+    y_min, y_max, z_min, z_max = region
+    y_hi = y_max - PATCH_H
+    z_hi = z_max - PATCH_W
+    if y_hi < y_min or z_hi < z_min:
+        return False
+    hy0, hy1, hz0, hz1 = HELD_OUT_BOX
+    covered = (
+        y_min > hy0 - PATCH_H and y_hi < hy1
+        and z_min > hz0 - PATCH_W and z_hi < hz1
+    )
+    return not covered
+
+
+def _held_out_origins():
+    hy0, hy1, hz0, hz1 = HELD_OUT_BOX
+    origins = []
+    for y_min, y_max, z_min, z_max in REGIONS:
+        y_lo = max(y_min, hy0 - (PATCH_H - MASK_H - MASK_MARGIN))
+        y_hi = min(y_max - PATCH_H, hy0 - MASK_MARGIN)
+        z_lo = max(z_min, hz0 - (PATCH_W - MASK_W - MASK_MARGIN))
+        z_hi = min(z_max - PATCH_W, hz0 - MASK_MARGIN)
+        if y_lo <= y_hi and z_lo <= z_hi:
+            origins.append((y_lo, y_hi, z_lo, z_hi))
+    return tuple(origins)
+
+
+assert HELD_OUT_BOX[1] - HELD_OUT_BOX[0] == MASK_H
+assert HELD_OUT_BOX[3] - HELD_OUT_BOX[2] == MASK_W
+PATCH_REGIONS = tuple(region for region in REGIONS if _region_has_free_origin(region))
+HELD_OUT_ORIGINS = _held_out_origins()
+assert PATCH_REGIONS and HELD_OUT_ORIGINS
+
+
 def make_inpainting_sample(rng, center, augment):
-    y_min, y_max, z_min, z_max = REGIONS[rng.integers(len(REGIONS))]
-    y = int(rng.integers(y_min, y_max - PATCH_H + 1))
-    z = int(rng.integers(z_min, z_max - PATCH_W + 1))
-    mask_y = int(rng.integers(16, PATCH_H - MASK_H - 15))
-    mask_z = int(rng.integers(16, PATCH_W - MASK_W - 15))
+    y_min, y_max, z_min, z_max = PATCH_REGIONS[rng.integers(len(PATCH_REGIONS))]
+    for _ in range(1000):
+        y = int(rng.integers(y_min, y_max - PATCH_H + 1))
+        z = int(rng.integers(z_min, z_max - PATCH_W + 1))
+        if not overlaps_held_out(y, z):
+            break
+    else:
+        raise RuntimeError("Не удалось выбрать патч вне held-out блока")
+    mask_y = int(rng.integers(MASK_MARGIN, PATCH_H - MASK_H - MASK_MARGIN + 1))
+    mask_z = int(rng.integers(MASK_MARGIN, PATCH_W - MASK_W - MASK_MARGIN + 1))
     flip_h = augment and bool(rng.integers(2))
     flip_v = augment and bool(rng.integers(2))
     amp_scale = float(rng.uniform(*AMP_SCALE_RANGE)) if augment else 1.0
     return center, y, z, mask_y, mask_z, flip_h, flip_v, amp_scale
+
+
+def make_held_out_sample(rng, center, augment):
+    y_lo, y_hi, z_lo, z_hi = HELD_OUT_ORIGINS[rng.integers(len(HELD_OUT_ORIGINS))]
+    y = int(rng.integers(y_lo, y_hi + 1))
+    z = int(rng.integers(z_lo, z_hi + 1))
+    mask_y = HELD_OUT_BOX[0] - y
+    mask_z = HELD_OUT_BOX[2] - z
+    flip_h = augment and bool(rng.integers(2))
+    flip_v = augment and bool(rng.integers(2))
+    amp_scale = float(rng.uniform(*AMP_SCALE_RANGE)) if augment else 1.0
+    return center, y, z, mask_y, mask_z, flip_h, flip_v, amp_scale
+
+
+def seed_worker(worker_id):
+    info = get_worker_info()
+    info.dataset.rng = np.random.default_rng(info.seed)
 
 
 def make_outpainting_sample(rng, center, augment):
@@ -122,7 +186,8 @@ class InpaintingDataset(Dataset):
         std,
         augment,
         seed,
-        dynamic
+        dynamic,
+        held_out=False
     ):
         self.cube = cube
         self.centers = centers
@@ -131,13 +196,14 @@ class InpaintingDataset(Dataset):
         self.std = std
         self.augment = augment
         self.dynamic = dynamic
+        self.sample_fn = make_held_out_sample if held_out else make_inpainting_sample
         self.rng = np.random.default_rng(seed)
         self.noise_bank = (
             _make_noise_bank(self.rng, PATCH_H, PATCH_W)
             if augment and NOISE_SIGMA > 0 else None
         )
         self.samples = None if dynamic else _make_samples(
-            make_inpainting_sample,
+            self.sample_fn,
             centers,
             samples_per_center,
             augment,
@@ -151,7 +217,7 @@ class InpaintingDataset(Dataset):
         if self.samples is not None:
             return self.samples[index]
         center = int(self.centers[index // self.samples_per_center])
-        return make_inpainting_sample(self.rng, center, self.augment)
+        return self.sample_fn(self.rng, center, self.augment)
 
     def __getitem__(self, index):
         center, y, z, mask_y, mask_z, flip_h, flip_v, amp_scale = self.get_sample(index)
