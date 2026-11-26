@@ -247,7 +247,8 @@ class InpaintingDataset(Dataset):
         augment,
         seed,
         dynamic,
-        held_out=False
+        held_out=False,
+        predicted_context=False
     ):
         self.cube = cube
         self.centers = centers
@@ -256,6 +257,7 @@ class InpaintingDataset(Dataset):
         self.std = std
         self.augment = augment
         self.dynamic = dynamic
+        self.predicted_context = predicted_context
         self.sample_fn = make_held_out_sample if held_out else make_inpainting_sample
         self.rng = np.random.default_rng(seed)
         self.noise_bank = (
@@ -285,7 +287,7 @@ class InpaintingDataset(Dataset):
             self.noise_bank[index % len(self.noise_bank)]
             if self.noise_bank is not None else None
         )
-        return _prepare_sequential(
+        sample = _prepare_sequential(
             self.cube,
             self.mean,
             self.std,
@@ -297,6 +299,37 @@ class InpaintingDataset(Dataset):
             flip_h,
             amp_scale,
             noise
+        )
+        if not self.predicted_context:
+            return sample
+
+        context_inputs = []
+        context_mask = []
+        for offset in (2, 1):
+            use_prediction = depth >= offset and center - offset >= 2
+            if use_prediction:
+                previous_inputs, _, _ = _prepare_sequential(
+                    self.cube,
+                    self.mean,
+                    self.std,
+                    center - offset,
+                    z,
+                    strip_index,
+                    mask_z,
+                    depth - offset,
+                    flip_h,
+                    amp_scale,
+                    noise
+                )
+            else:
+                previous_inputs = sample[0]
+            context_inputs.append(previous_inputs)
+            context_mask.append(use_prediction)
+
+        return (
+            *sample,
+            torch.stack(context_inputs),
+            torch.tensor(context_mask, dtype=torch.bool)
         )
 
 
