@@ -14,6 +14,19 @@ PATCH_W = 144
 MASK_H = 213
 MASK_W = 103
 MASK_MARGIN = 16
+CONTEXT_OFFSETS = (
+    (-MASK_H, 0),
+    (-(MASK_H // 2), 0),
+    (0, -MASK_W),
+    (0, -(MASK_W // 2)),
+    (0, MASK_W // 2),
+    (0, MASK_W),
+    (MASK_H // 2, 0),
+    (MASK_H, 0)
+)
+HORIZONTAL_FLIP_ORDER = [0, 1, 5, 4, 3, 2, 6, 7, 8]
+VERTICAL_FLIP_ORDER = [7, 6, 2, 3, 4, 5, 1, 0, 8]
+INPAINTING_HOLE = (368, 581, 179, 282)
 
 HELD_OUT_BOX = (77, 290, 179, 282)
 
@@ -31,18 +44,24 @@ def overlaps_held_out(y, z):
     return y < hy1 and y + PATCH_H > hy0 and z < hz1 and z + PATCH_W > hz0
 
 
+def context_overlaps_held_out(y, z):
+    return any(
+        overlaps_held_out(y + dy, z + dz)
+        for dy, dz in CONTEXT_OFFSETS
+    )
+
+
 def _region_has_free_origin(region):
     y_min, y_max, z_min, z_max = region
     y_hi = y_max - PATCH_H
     z_hi = z_max - PATCH_W
     if y_hi < y_min or z_hi < z_min:
         return False
-    hy0, hy1, hz0, hz1 = HELD_OUT_BOX
-    covered = (
-        y_min > hy0 - PATCH_H and y_hi < hy1
-        and z_min > hz0 - PATCH_W and z_hi < hz1
-    )
-    return not covered
+    for y in range(y_min, y_hi + 1):
+        for z in range(z_min, z_hi + 1):
+            if not overlaps_held_out(y, z) and not context_overlaps_held_out(y, z):
+                return True
+    return False
 
 
 def _held_out_origins():
@@ -70,7 +89,7 @@ def make_inpainting_sample(rng, center, augment):
     for _ in range(1000):
         y = int(rng.integers(y_min, y_max - PATCH_H + 1))
         z = int(rng.integers(z_min, z_max - PATCH_W + 1))
-        if not overlaps_held_out(y, z):
+        if not overlaps_held_out(y, z) and not context_overlaps_held_out(y, z):
             break
     else:
         raise RuntimeError("Не удалось выбрать патч вне held-out блока")
@@ -117,13 +136,37 @@ def _make_samples(make_sample, centers, samples_per_center, augment, seed):
     ]
 
 
-def _make_noise_bank(rng, patch_h, patch_w):
+def _make_noise_bank(rng, channels, patch_h, patch_w):
     bank = []
     for _ in range(NOISE_BANK_SIZE):
         sigma = float(rng.uniform(0.0, NOISE_SIGMA))
-        noise = rng.standard_normal((5, patch_h, patch_w)).astype(np.float32)
+        noise = rng.standard_normal((channels, patch_h, patch_w)).astype(np.float32)
         bank.append(noise * sigma)
     return np.stack(bank)
+
+
+def directional_patch(plane, y, z, mask, real_mask):
+    target = plane[y: y + PATCH_H, z: z + PATCH_W].copy()
+    padding = ((MASK_H, MASK_H), (MASK_W, MASK_W))
+    padded = np.pad(plane, padding, mode="edge")
+    padded_mask = np.pad(mask, padding)
+    padded_real = np.pad(real_mask, padding)
+    patches = []
+    masks = []
+    for dy, dz in CONTEXT_OFFSETS:
+        patch_y = y + dy + MASK_H
+        patch_z = z + dz + MASK_W
+        mask_y = dy + MASK_H
+        mask_z = dz + MASK_W
+        context_mask = np.maximum(
+            padded_mask[mask_y: mask_y + PATCH_H, mask_z: mask_z + PATCH_W],
+            padded_real[patch_y: patch_y + PATCH_H, patch_z: patch_z + PATCH_W]
+        )
+        patches.append(padded[patch_y: patch_y + PATCH_H, patch_z: patch_z + PATCH_W].copy())
+        masks.append(context_mask)
+    patches.append(target)
+    masks.append(mask)
+    return np.stack(patches), np.stack(masks), target
 
 
 def _prepare(
@@ -139,14 +182,20 @@ def _prepare(
     flip_h,
     flip_v,
     amp_scale,
-    noise
+    noise,
+    directional=False,
+    real_mask=None
 ):
-    patch = cube[
-        center - 2: center + 3,
-        y: y + patch_h,
-        z: z + patch_w
-    ].copy()
-    target = patch[2].copy()
+    if directional:
+        patch, masks, target = directional_patch(cube[center], y, z, mask, real_mask)
+    else:
+        patch = cube[
+            center - 2: center + 3,
+            y: y + patch_h,
+            z: z + patch_w
+        ].copy()
+        target = patch[2].copy()
+        masks = mask[None]
 
     patch = (patch - mean) / std
     target = (target - mean) / std
@@ -155,14 +204,18 @@ def _prepare(
     if noise is not None:
         patch += noise
 
-    patch *= (1 - mask)[None]
+    patch *= (1 - masks)
 
     if flip_h:
+        if directional:
+            patch = patch[HORIZONTAL_FLIP_ORDER]
         patch = patch[:, :, ::-1]
         target = target[:, ::-1]
         mask = mask[:, ::-1]
 
     if flip_v:
+        if directional:
+            patch = patch[VERTICAL_FLIP_ORDER]
         patch = patch[:, ::-1, :]
         target = target[::-1, :]
         mask = mask[::-1, :]
@@ -198,8 +251,11 @@ class InpaintingDataset(Dataset):
         self.dynamic = dynamic
         self.sample_fn = make_held_out_sample if held_out else make_inpainting_sample
         self.rng = np.random.default_rng(seed)
+        self.real_mask = np.zeros(cube.shape[1:], dtype=np.float32)
+        y0, y1, z0, z1 = INPAINTING_HOLE
+        self.real_mask[y0:y1, z0:z1] = 1
         self.noise_bank = (
-            _make_noise_bank(self.rng, PATCH_H, PATCH_W)
+            _make_noise_bank(self.rng, len(CONTEXT_OFFSETS) + 1, PATCH_H, PATCH_W)
             if augment and NOISE_SIGMA > 0 else None
         )
         self.samples = None if dynamic else _make_samples(
@@ -240,7 +296,9 @@ class InpaintingDataset(Dataset):
             flip_h,
             flip_v,
             amp_scale,
-            noise
+            noise,
+            True,
+            self.real_mask
         )
 
 
@@ -265,7 +323,7 @@ class OutpaintingDataset(Dataset):
         self.dynamic = dynamic
         self.rng = np.random.default_rng(seed)
         self.noise_bank = (
-            _make_noise_bank(self.rng, OUT_PAINT_PATCH_H, OUT_PAINT_PATCH_W)
+            _make_noise_bank(self.rng, 5, OUT_PAINT_PATCH_H, OUT_PAINT_PATCH_W)
             if augment and NOISE_SIGMA > 0 else None
         )
         self.samples = None if dynamic else _make_samples(
