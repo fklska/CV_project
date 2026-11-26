@@ -5,3 +5,4 @@ tensorboard
 jupyter
 tqdm
 mlflow
+triton-windows; sys_platform == "win32"
