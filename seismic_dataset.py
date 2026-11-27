@@ -2,20 +2,20 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, get_worker_info
 
-REGIONS = (
-    (0, 368, 0, 462),
-    (581, 951, 0, 462),
-    (0, 951, 0, 179),
-    (0, 951, 282, 462),
-)
-
-PATCH_H = 304
-PATCH_W = 144
-MASK_H = 213
-MASK_W = 103
+PATCH_H = 144
+PATCH_W = 304
+MASK_H = 103
+MASK_W = 213
 MASK_MARGIN = 16
+CONTEXT_X = (PATCH_W - MASK_W) // 2
+VOLUME_W = 580
+STRIP_STARTS = tuple(range(0, VOLUME_W, MASK_W))
+REAL_HOLE_Z = (179, 282)
+REAL_HOLE_Y = (368, 581)
+SEQUENCE_STEPS = REAL_HOLE_Y[1] - REAL_HOLE_Y[0]
 
-HELD_OUT_BOX = (77, 290, 179, 282)
+HELD_OUT_BOX = (76, 179, 0, VOLUME_W)
+PATCH_REGIONS = ((282, 462, 0, VOLUME_W),)
 
 OUT_PAINT_PATCH_H = 368
 OUT_PAINT_PATCH_W = 256
@@ -26,72 +26,79 @@ NOISE_SIGMA = 0.05
 NOISE_BANK_SIZE = 64
 
 
-def overlaps_held_out(y, z):
-    hy0, hy1, hz0, hz1 = HELD_OUT_BOX
-    return y < hy1 and y + PATCH_H > hy0 and z < hz1 and z + PATCH_W > hz0
+def overlaps_held_out(z, x):
+    hz0, hz1, hx0, hx1 = HELD_OUT_BOX
+    return z < hz1 and z + PATCH_H > hz0 and x < hx1 and x + PATCH_W > hx0
 
 
-def _region_has_free_origin(region):
-    y_min, y_max, z_min, z_max = region
-    y_hi = y_max - PATCH_H
-    z_hi = z_max - PATCH_W
-    if y_hi < y_min or z_hi < z_min:
-        return False
-    hy0, hy1, hz0, hz1 = HELD_OUT_BOX
-    covered = (
-        y_min > hy0 - PATCH_H and y_hi < hy1
-        and z_min > hz0 - PATCH_W and z_hi < hz1
-    )
-    return not covered
+def overlaps_real_hole(z):
+    return z < REAL_HOLE_Z[1] and z + PATCH_H > REAL_HOLE_Z[0]
 
 
-def _held_out_origins():
-    hy0, hy1, hz0, hz1 = HELD_OUT_BOX
-    origins = []
-    for y_min, y_max, z_min, z_max in REGIONS:
-        y_lo = max(y_min, hy0 - (PATCH_H - MASK_H - MASK_MARGIN))
-        y_hi = min(y_max - PATCH_H, hy0 - MASK_MARGIN)
-        z_lo = max(z_min, hz0 - (PATCH_W - MASK_W - MASK_MARGIN))
-        z_hi = min(z_max - PATCH_W, hz0 - MASK_MARGIN)
-        if y_lo <= y_hi and z_lo <= z_hi:
-            origins.append((y_lo, y_hi, z_lo, z_hi))
-    return tuple(origins)
-
-
-assert HELD_OUT_BOX[1] - HELD_OUT_BOX[0] == MASK_H
-assert HELD_OUT_BOX[3] - HELD_OUT_BOX[2] == MASK_W
-PATCH_REGIONS = tuple(region for region in REGIONS if _region_has_free_origin(region))
-HELD_OUT_ORIGINS = _held_out_origins()
-assert PATCH_REGIONS and HELD_OUT_ORIGINS
+def sample_sequence_depth(rng, center):
+    max_depth = min(SEQUENCE_STEPS - 1, center - 1)
+    return int(rng.integers(max_depth + 1))
 
 
 def make_inpainting_sample(rng, center, augment):
-    y_min, y_max, z_min, z_max = PATCH_REGIONS[rng.integers(len(PATCH_REGIONS))]
-    for _ in range(1000):
-        y = int(rng.integers(y_min, y_max - PATCH_H + 1))
-        z = int(rng.integers(z_min, z_max - PATCH_W + 1))
-        if not overlaps_held_out(y, z):
-            break
-    else:
-        raise RuntimeError("Не удалось выбрать патч вне held-out блока")
-    mask_y = int(rng.integers(MASK_MARGIN, PATCH_H - MASK_H - MASK_MARGIN + 1))
-    mask_z = int(rng.integers(MASK_MARGIN, PATCH_W - MASK_W - MASK_MARGIN + 1))
+    z_min, z_max, _, _ = PATCH_REGIONS[rng.integers(len(PATCH_REGIONS))]
+    z = int(rng.integers(z_min, z_max - PATCH_H + 1))
+    strip_index = int(rng.integers(len(STRIP_STARTS)))
+    mask_z = int(rng.integers(MASK_MARGIN, PATCH_H - MASK_H - MASK_MARGIN + 1))
+    depth = sample_sequence_depth(rng, center)
     flip_h = augment and bool(rng.integers(2))
-    flip_v = augment and bool(rng.integers(2))
     amp_scale = float(rng.uniform(*AMP_SCALE_RANGE)) if augment else 1.0
-    return center, y, z, mask_y, mask_z, flip_h, flip_v, amp_scale
+    return center, z, strip_index, mask_z, depth, flip_h, amp_scale
 
 
 def make_held_out_sample(rng, center, augment):
-    y_lo, y_hi, z_lo, z_hi = HELD_OUT_ORIGINS[rng.integers(len(HELD_OUT_ORIGINS))]
-    y = int(rng.integers(y_lo, y_hi + 1))
-    z = int(rng.integers(z_lo, z_hi + 1))
-    mask_y = HELD_OUT_BOX[0] - y
-    mask_z = HELD_OUT_BOX[2] - z
+    strip_index = int(rng.integers(len(STRIP_STARTS)))
+    mask_z = int(rng.integers(MASK_MARGIN, PATCH_H - MASK_H - MASK_MARGIN + 1))
+    z = HELD_OUT_BOX[0] - mask_z
+    depth = sample_sequence_depth(rng, center)
     flip_h = augment and bool(rng.integers(2))
-    flip_v = augment and bool(rng.integers(2))
     amp_scale = float(rng.uniform(*AMP_SCALE_RANGE)) if augment else 1.0
-    return center, y, z, mask_y, mask_z, flip_h, flip_v, amp_scale
+    return center, z, strip_index, mask_z, depth, flip_h, amp_scale
+
+
+def extract_sequential_patch(frames, z, patch_x):
+    frames = frames[:, z:z + PATCH_H, :]
+    pad_left = max(0, -patch_x)
+    pad_right = max(0, patch_x + PATCH_W - frames.shape[2])
+    if pad_left or pad_right:
+        frames = np.pad(
+            frames,
+            ((0, 0), (0, 0), (pad_left, pad_right)),
+            mode="edge"
+        )
+    start = patch_x + pad_left
+    return frames[:, :, start:start + PATCH_W].copy()
+
+
+def extract_sequential_frames(cube, center, z, patch_x):
+    frames = cube[center - 2:center + 3]
+    return extract_sequential_patch(frames, z, patch_x)
+
+
+def extract_sequential_frame(cube, center, z, patch_x):
+    frame = cube[center:center + 1]
+    return extract_sequential_patch(frame, z, patch_x)[0]
+
+
+def sequential_masks(strip_index, mask_z):
+    x_start = STRIP_STARTS[strip_index]
+    width = min(MASK_W, VOLUME_W - x_start)
+    target_mask = np.zeros((PATCH_H, PATCH_W), dtype=np.float32)
+    current_mask = np.zeros_like(target_mask)
+    future_mask = np.zeros_like(target_mask)
+    target_mask[
+        mask_z:mask_z + MASK_H,
+        CONTEXT_X:CONTEXT_X + width
+    ] = 1
+    current_x = 0 if strip_index == 0 else CONTEXT_X
+    current_mask[mask_z:mask_z + MASK_H, current_x:] = 1
+    future_mask[mask_z:mask_z + MASK_H, :] = 1
+    return target_mask, current_mask, future_mask
 
 
 def seed_worker(worker_id):
@@ -124,6 +131,59 @@ def _make_noise_bank(rng, patch_h, patch_w):
         noise = rng.standard_normal((5, patch_h, patch_w)).astype(np.float32)
         bank.append(noise * sigma)
     return np.stack(bank)
+
+
+def _prepare_sequential(
+    cube,
+    mean,
+    std,
+    center,
+    z,
+    strip_index,
+    mask_z,
+    depth,
+    flip_h,
+    amp_scale,
+    noise
+):
+    patch_x = STRIP_STARTS[strip_index] - CONTEXT_X
+    patch = extract_sequential_frames(cube, center, z, patch_x)
+    anchor = extract_sequential_frame(cube, center - depth - 1, z, patch_x)
+    target = patch[2].copy()
+    target_mask, current_mask, future_mask = sequential_masks(strip_index, mask_z)
+    empty_mask = np.zeros_like(current_mask)
+    frame_masks = np.stack((
+        empty_mask,
+        empty_mask,
+        current_mask,
+        future_mask,
+        future_mask
+    ))
+
+    patch = (patch - mean) / std
+    anchor = (anchor - mean) / std
+    target = (target - mean) / std
+    patch *= amp_scale
+    anchor *= amp_scale
+    target *= amp_scale
+    if noise is not None:
+        patch += noise
+        anchor += noise[2]
+    patch *= 1 - frame_masks
+
+    if flip_h:
+        patch = patch[:, :, ::-1]
+        anchor = anchor[:, ::-1]
+        target = target[:, ::-1]
+        target_mask = target_mask[:, ::-1]
+        current_mask = current_mask[:, ::-1]
+
+    inputs = np.concatenate((patch, anchor[None], current_mask[None]), axis=0)
+    return (
+        torch.from_numpy(inputs).float(),
+        torch.from_numpy(target[None].copy()).float(),
+        torch.from_numpy(target_mask[None].copy()).float()
+    )
 
 
 def _prepare(
@@ -187,7 +247,8 @@ class InpaintingDataset(Dataset):
         augment,
         seed,
         dynamic,
-        held_out=False
+        held_out=False,
+        rollout_steps=0
     ):
         self.cube = cube
         self.centers = centers
@@ -196,6 +257,7 @@ class InpaintingDataset(Dataset):
         self.std = std
         self.augment = augment
         self.dynamic = dynamic
+        self.rollout_steps = rollout_steps
         self.sample_fn = make_held_out_sample if held_out else make_inpainting_sample
         self.rng = np.random.default_rng(seed)
         self.noise_bank = (
@@ -220,28 +282,52 @@ class InpaintingDataset(Dataset):
         return self.sample_fn(self.rng, center, self.augment)
 
     def __getitem__(self, index):
-        center, y, z, mask_y, mask_z, flip_h, flip_v, amp_scale = self.get_sample(index)
-        mask = np.zeros((PATCH_H, PATCH_W), dtype=np.float32)
-        mask[mask_y: mask_y + MASK_H, mask_z: mask_z + MASK_W] = 1
+        center, z, strip_index, mask_z, depth, flip_h, amp_scale = self.get_sample(index)
         noise = (
             self.noise_bank[index % len(self.noise_bank)]
             if self.noise_bank is not None else None
         )
-        return _prepare(
+        if self.rollout_steps:
+            start_offset = min(self.rollout_steps - 1, depth, center - 2)
+            center -= start_offset
+            depth -= start_offset
+
+        sample = _prepare_sequential(
             self.cube,
             self.mean,
             self.std,
-            PATCH_H,
-            PATCH_W,
             center,
-            y,
             z,
-            mask,
+            strip_index,
+            mask_z,
+            depth,
             flip_h,
-            flip_v,
             amp_scale,
             noise
         )
+        if not self.rollout_steps:
+            return sample
+
+        inputs = [sample[0]]
+        targets = [sample[1]]
+        for offset in range(1, self.rollout_steps):
+            step_inputs, step_target, _ = _prepare_sequential(
+                self.cube,
+                self.mean,
+                self.std,
+                center + offset,
+                z,
+                strip_index,
+                mask_z,
+                depth + offset,
+                flip_h,
+                amp_scale,
+                noise
+            )
+            inputs.append(step_inputs)
+            targets.append(step_target)
+
+        return torch.stack(inputs), torch.stack(targets), sample[2]
 
 
 class OutpaintingDataset(Dataset):
