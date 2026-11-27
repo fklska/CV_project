@@ -232,12 +232,15 @@ def _prepare(
     amp_scale,
     noise
 ):
-    patch = cube[
-        center - 2: center + 3,
-        y: y + patch_h,
-        z: z + patch_w
-    ].copy()
+    indices = np.clip(np.arange(center - 2, center + 3), 0, cube.shape[0] - 1)
+    patch = np.stack([
+        cube[index, y:y + patch_h, z:z + patch_w]
+        for index in indices
+    ])
     target = patch[2].copy()
+    frame_masks = np.repeat(mask[None], 5, axis=0)
+    if center > 0:
+        frame_masks[:2] = 0
 
     patch = (patch - mean) / std
     target = (target - mean) / std
@@ -246,7 +249,7 @@ def _prepare(
     if noise is not None:
         patch += noise
 
-    patch *= (1 - mask)[None]
+    patch *= 1 - frame_masks
 
     if flip_h:
         patch = patch[:, :, ::-1]
@@ -369,7 +372,9 @@ class OutpaintingDataset(Dataset):
         std,
         augment,
         seed,
-        dynamic
+        dynamic,
+        rollout_steps=0,
+        fixed_start=False
     ):
         self.cube = cube
         self.centers = centers
@@ -378,6 +383,8 @@ class OutpaintingDataset(Dataset):
         self.std = std
         self.augment = augment
         self.dynamic = dynamic
+        self.rollout_steps = rollout_steps
+        self.fixed_start = fixed_start
         self.rng = np.random.default_rng(seed)
         self.noise_bank = (
             _make_noise_bank(self.rng, OUT_PAINT_PATCH_H, OUT_PAINT_PATCH_W)
@@ -409,18 +416,43 @@ class OutpaintingDataset(Dataset):
             self.noise_bank[index % len(self.noise_bank)]
             if self.noise_bank is not None else None
         )
-        return _prepare(
-            self.cube,
-            self.mean,
-            self.std,
-            OUT_PAINT_PATCH_H,
-            OUT_PAINT_PATCH_W,
-            center,
-            y,
-            z,
-            mask,
-            flip_h,
-            flip_v,
-            amp_scale,
-            noise
+        steps = self.rollout_steps or 1
+        start = center
+        if self.rollout_steps:
+            start_offset = (
+                0 if self.fixed_start
+                else int(self.rng.integers(min(steps, center + 1)))
+            )
+            start = min(center - start_offset, self.cube.shape[0] - steps)
+
+        inputs = []
+        targets = []
+        for offset in range(steps):
+            step_inputs, step_target, step_mask = _prepare(
+                self.cube,
+                self.mean,
+                self.std,
+                OUT_PAINT_PATCH_H,
+                OUT_PAINT_PATCH_W,
+                start + offset,
+                y,
+                z,
+                mask,
+                flip_h,
+                flip_v,
+                amp_scale,
+                noise
+            )
+            inputs.append(step_inputs)
+            targets.append(step_target)
+
+        if not self.rollout_steps:
+            return inputs[0], targets[0], step_mask
+
+        sources = prediction_sources(0 if self.fixed_start else start, steps)
+        return (
+            torch.stack(inputs),
+            torch.stack(targets),
+            step_mask,
+            torch.from_numpy(sources)
         )
