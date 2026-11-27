@@ -279,7 +279,8 @@ class InpaintingDataset(Dataset):
         seed,
         dynamic,
         held_out=False,
-        rollout_steps=0
+        rollout_steps=0,
+        fixed_start=False
     ):
         self.cube = cube
         self.centers = centers
@@ -289,6 +290,7 @@ class InpaintingDataset(Dataset):
         self.augment = augment
         self.dynamic = dynamic
         self.rollout_steps = rollout_steps
+        self.fixed_start = fixed_start
         self.sample_fn = make_held_out_sample if held_out else make_inpainting_sample
         self.rng = np.random.default_rng(seed)
         self.noise_bank = (
@@ -321,7 +323,7 @@ class InpaintingDataset(Dataset):
         steps = self.rollout_steps or 1
         start = center
         if self.rollout_steps:
-            start_offset = min(steps - 1, depth, center)
+            start_offset = 0 if self.fixed_start else min(steps - 1, depth, center)
             start = min(center - start_offset, VOLUME_X - steps)
 
         inputs = []
@@ -348,7 +350,7 @@ class InpaintingDataset(Dataset):
         if not self.rollout_steps:
             return inputs[0], targets[0], mask
 
-        sources = prediction_sources(start, steps)
+        sources = prediction_sources(0 if self.fixed_start else start, steps)
         return (
             torch.stack(inputs),
             torch.stack(targets),
