@@ -218,7 +218,7 @@ def _prepare(
     patch *= (1 - mask)[None]
 
     if flip_h:
-        patch = patch[:, :, ::-1]
+        patch = patch[:, ::-1]
         target = target[:, ::-1]
         mask = mask[:, ::-1]
 
@@ -248,7 +248,7 @@ class InpaintingDataset(Dataset):
         seed,
         dynamic,
         held_out=False,
-        rollout_steps=0
+        predicted_context=False
     ):
         self.cube = cube
         self.centers = centers
@@ -257,7 +257,7 @@ class InpaintingDataset(Dataset):
         self.std = std
         self.augment = augment
         self.dynamic = dynamic
-        self.rollout_steps = rollout_steps
+        self.predicted_context = predicted_context
         self.sample_fn = make_held_out_sample if held_out else make_inpainting_sample
         self.rng = np.random.default_rng(seed)
         self.noise_bank = (
@@ -287,11 +287,6 @@ class InpaintingDataset(Dataset):
             self.noise_bank[index % len(self.noise_bank)]
             if self.noise_bank is not None else None
         )
-        if self.rollout_steps:
-            start_offset = min(self.rollout_steps - 1, depth, center - 2)
-            center -= start_offset
-            depth -= start_offset
-
         sample = _prepare_sequential(
             self.cube,
             self.mean,
@@ -305,29 +300,37 @@ class InpaintingDataset(Dataset):
             amp_scale,
             noise
         )
-        if not self.rollout_steps:
+        if not self.predicted_context:
             return sample
 
-        inputs = [sample[0]]
-        targets = [sample[1]]
-        for offset in range(1, self.rollout_steps):
-            step_inputs, step_target, _ = _prepare_sequential(
-                self.cube,
-                self.mean,
-                self.std,
-                center + offset,
-                z,
-                strip_index,
-                mask_z,
-                depth + offset,
-                flip_h,
-                amp_scale,
-                noise
-            )
-            inputs.append(step_inputs)
-            targets.append(step_target)
+        context_inputs = []
+        context_mask = []
+        for offset in (2, 1):
+            use_prediction = depth >= offset and center - offset >= 2
+            if use_prediction:
+                previous_inputs, _, _ = _prepare_sequential(
+                    self.cube,
+                    self.mean,
+                    self.std,
+                    center - offset,
+                    z,
+                    strip_index,
+                    mask_z,
+                    depth - offset,
+                    flip_h,
+                    amp_scale,
+                    noise
+                )
+            else:
+                previous_inputs = sample[0]
+            context_inputs.append(previous_inputs)
+            context_mask.append(use_prediction)
 
-        return torch.stack(inputs), torch.stack(targets), sample[2]
+        return (
+            *sample,
+            torch.stack(context_inputs),
+            torch.tensor(context_mask, dtype=torch.bool)
+        )
 
 
 class OutpaintingDataset(Dataset):
