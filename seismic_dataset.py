@@ -218,7 +218,7 @@ def _prepare(
     patch *= (1 - mask)[None]
 
     if flip_h:
-        patch = patch[:, ::-1]
+        patch = patch[:, :, ::-1]
         target = target[:, ::-1]
         mask = mask[:, ::-1]
 
